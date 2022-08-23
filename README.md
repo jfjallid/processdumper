@@ -4,7 +4,9 @@ A proof of concept to dump the memory of a process directly to memory
 instead of dumping to a file. This allows for custom operations such
 as encrypting the process dump before writing to file or sending over
 a network socket. Currently this program will invert the dump in memory
-before writing the output to disk.
+before writing the output to disk. Furthermore, in an attempt to avoid
+crashing the targeted process when performing the dump, the process is first
+cloned and then dumped.
 
 ## Usage
     .\pdump.exe -h
@@ -21,7 +23,7 @@ using MinGW. Note that the commands "sed" and "date" are required to calculate
 the date to use for the built-in killswitch.
 
 
-To compile both 32-bit and 64-bit binaries from linux:
+To compile the 64-bit binarie from linux:
 
     make build
 

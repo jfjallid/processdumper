@@ -31,11 +31,9 @@
 
 void reportBytesProcess(unsigned char *, DWORD);
 
-
 LPVOID dumpBuffer;
 size_t dumpBufferSize = 1024*1024*75; // Expect memory to dump to be less than 75MiB
 DWORD bytesRead = 0;
-int debug = 0;
 
 BOOL CALLBACK minidumpCallback(
     __in    PVOID callbackParam,
@@ -51,7 +49,6 @@ BOOL CALLBACK minidumpCallback(
         callbackOutput->Status = S_FALSE;
         if (debug) {
             printf("[Debug] Received IoStartCallback\n");
-            //printf("[Debug] Redirecting IO through callbacks\n");
         }
         break;
     case IoWriteAllCallback:
@@ -90,7 +87,9 @@ BOOL CALLBACK minidumpCallback(
         callbackOutput->Status = S_OK;
         break;
     case IoFinishCallback:
-        printf("[Debug] Finished dumping process in IoFinishCallback\n");
+        if (debug) {
+            printf("[Debug] Finished dumping process in IoFinishCallback\n");
+        }
         callbackOutput->Status = S_OK;
         break;
     case IsProcessSnapshotCallback:
@@ -103,9 +102,8 @@ BOOL CALLBACK minidumpCallback(
     return 1;
 }
 
-void DumpProcess(int debugArg, char *targetProcess) {
+void DumpProcess(char *targetProcess) {
     DWORD processPID = -1;
-    debug = debugArg;
     
     HANDLE processHandle = NULL;
     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -208,9 +206,6 @@ void DumpProcess(int debugArg, char *targetProcess) {
     PssFreeSnapshot(GetCurrentProcess(), (HPSS)clonedHandle);
 }
 
-FILE *outfile = NULL;
-char *filename;
-
 void reportBytesProcess(unsigned char *dumpBuffer, DWORD bytesRead) {
     // Write dump to file
     if (fwrite(dumpBuffer, 1, (size_t)bytesRead, outfile) != bytesRead) {
@@ -218,50 +213,4 @@ void reportBytesProcess(unsigned char *dumpBuffer, DWORD bytesRead) {
     } else {
         printf("Done, process dumped %d bytes written to %s\n", bytesRead, filename);
     }
-}
-
-int main(int argc, char *argv[]) {
-    // Killswitch
-    // Use :r! echo $(($(date +\%s)+604800))
-    // Where 86400 is to make binary valid 1 day, 604800 is 1 week
-    
-    u_int64 endTime = 0000000000;
-    u_int64 now = time(NULL);
-    if (now > endTime) {
-        return 0;
-    }
-
-    if (argc < 3) {
-        printf("Usage: %s [options] <process name> <filepath>\n", argv[0]);
-        printf("");
-        printf("  [options]\n");
-        printf("    -d, enable debug outprints\n");
-        printf("\n");
-        return -1;
-    }
-    char *targetProcess;
-    if (argc > 3) {
-        if (strncmp(argv[1], "-d", 2) == 0) {
-            debug = 1;
-        } else {
-            printf("Unknown parameter: %s\n", argv[1]);
-            return -1;
-        }
-        targetProcess = argv[2];
-        filename = argv[3];
-    } else {
-        targetProcess = argv[1];
-        filename = argv[2];
-    }
-    if (debug) {
-        printf("[Debug] Attempting to open file (%s) for writing\n", filename);
-    }
-
-    if ((outfile = fopen(filename, "wb")) == NULL) // will replace existing files
-    {
-        printf("Failed to open file (%s)\n", filename);
-        return -1;
-    }
-
-    DumpProcess(debug, targetProcess);
 }
